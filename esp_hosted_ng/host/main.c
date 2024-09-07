@@ -23,7 +23,8 @@
 #include "esp_cfg80211.h"
 #include "esp_stats.h"
 
-#define HOST_GPIO_PIN_INVALID -1
+#include "main.h"
+
 #define CONFIG_ALLOW_MULTICAST_WAKEUP 1
 
 #define STRINGIFY_HELPER(x) #x
@@ -31,31 +32,19 @@
 
 #define RELEASE_VERSION PROJECT_NAME "-" STRINGIFY(PROJECT_VERSION_MAJOR_1) "." STRINGIFY(PROJECT_VERSION_MAJOR_2) "." STRINGIFY(PROJECT_VERSION_MINOR) "." STRINGIFY(PROJECT_REVISION_PATCH_1) "." STRINGIFY(PROJECT_REVISION_PATCH_2)
 
-static int resetpin = HOST_GPIO_PIN_INVALID;
-static u32 clockspeed = 0;
 extern u8 ap_bssid[MAC_ADDR_LEN];
 extern volatile u8 host_sleep;
 u32 raw_tp_mode = 0;
-int log_level = ESP_INFO;
+int log_level = CONFIG_ESP_HOSTED_NG_LOG_LEVEL;
 #define VERSION_BUFFER_SIZE 50
 char version_str[VERSION_BUFFER_SIZE];
 
-
-module_param(resetpin, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-MODULE_PARM_DESC(resetpin, "Host's GPIO pin number which is connected to ESP32's EN to reset ESP32 device");
-
-module_param(clockspeed, uint, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-MODULE_PARM_DESC(clockspeed, "Hosts clock speed in MHz");
-
-module_param(raw_tp_mode, uint, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-MODULE_PARM_DESC(raw_tp_mode, "Mode choosed to test raw throughput");
 
 static void deinit_adapter(void);
 
 
 struct multicast_list mcast_list = {0};
 struct esp_adapter adapter;
-/*struct esp_device esp_dev;*/
 
 struct esp_adapter *esp_get_adapter(void)
 {
@@ -300,7 +289,11 @@ int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8 len)
 
 	clear_bit(ESP_INIT_DONE, &adapter->state_flags);
 	/* Deinit module if already initialized */
-	test_raw_tp_cleanup();
+#if TEST_RAW_TP
+	if (raw_tp_mode != 0) {
+		test_raw_tp_cleanup();
+	}
+#endif
 	esp_deinit_module(adapter);
 
 	pos = evt_buf;
@@ -999,39 +992,12 @@ static void deinit_adapter(void)
 		destroy_workqueue(adapter.if_rx_workqueue);
 }
 
-static void esp_reset(void)
-{
-	if (resetpin != HOST_GPIO_PIN_INVALID) {
-		/* Check valid GPIO or not */
-		if (!gpio_is_valid(resetpin)) {
-			esp_warn("host resetpin (%d) configured is invalid GPIO\n", resetpin);
-			resetpin = HOST_GPIO_PIN_INVALID;
-		} else {
-			gpio_request(resetpin, "sysfs");
-
-			/* HOST's resetpin set to OUTPUT, HIGH */
-			gpio_direction_output(resetpin, true);
-
-			/* HOST's resetpin set to LOW */
-			gpio_set_value(resetpin, 0);
-			udelay(200);
-
-			/* HOST's resetpin set to INPUT */
-			gpio_direction_input(resetpin);
-
-			esp_dbg("Triggering ESP reset.\n");
-		}
-	}
-}
-
-static int __init esp_init(void)
+int esp_init(void)
 {
 	int ret = 0;
 	struct esp_adapter *adapter = NULL;
 
-	/* Reset ESP, Clean start ESP */
-	esp_reset();
-	msleep(200);
+	esp_dbg("%s: begin\n", __func__);
 
 	adapter = init_adapter();
 
@@ -1039,17 +1005,19 @@ static int __init esp_init(void)
 		return -EFAULT;
 
 	/* Init transport layer */
-	ret = esp_init_interface_layer(adapter, clockspeed);
+	ret = esp_init_interface_layer(adapter);
 
 	if (ret != 0) {
 		deinit_adapter();
 	}
 
 	ret = debugfs_init();
+
+	esp_info("%s: end %d\n", __func__, ret);
 	return ret;
 }
 
-static void __exit esp_exit(void)
+void esp_exit(void)
 {
 	uint8_t iface_idx = 0;
 #if TEST_RAW_TP
@@ -1065,17 +1033,5 @@ static void __exit esp_exit(void)
 	esp_deinit_interface_layer();
 	deinit_adapter();
 
-	if (resetpin != HOST_GPIO_PIN_INVALID) {
-		gpio_free(resetpin);
-	}
 	debugfs_exit();
 }
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Amey Inamdar <amey.inamdar@espressif.com>");
-MODULE_AUTHOR("Mangesh Malusare <mangesh.malusare@espressif.com>");
-MODULE_AUTHOR("Yogesh Mantri <yogesh.mantri@espressif.com>");
-MODULE_AUTHOR("Kapil Gupta <kapil.gupta@espressif.com>");
-MODULE_DESCRIPTION("Wifi driver for ESP-Hosted solution");
-MODULE_VERSION(RELEASE_VERSION);
-module_init(esp_init);
-module_exit(esp_exit);
