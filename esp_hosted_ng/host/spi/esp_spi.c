@@ -398,15 +398,6 @@ static void adjust_spi_clock(struct esp_spi_context *spi_ctx, u8 spi_clk_mhz)
 	}
 }
 
-int esp_adjust_spi_clock(struct esp_adapter *adapter, u8 spi_clk_mhz)
-{
-	struct esp_spi_context *spi_ctx = adapter->if_context;
-
-	adjust_spi_clock(spi_ctx, spi_clk_mhz);
-
-	return 0;
-}
-
 static void esp_hw_reset(struct esp_spi_context *spi_ctx)
 {
 	gpiod_direction_output(spi_ctx->reset, 1);
@@ -582,6 +573,20 @@ static struct spi_driver esp_spi_driver = {
 	.probe = esp_spi_probe,
 	.remove = esp_spi_remove,
 };
+
+int generate_slave_intr(void *context, u8 data)
+{
+	return 0;
+}
+
+int esp_adjust_spi_clock(struct esp_adapter *adapter, u8 spi_clk_mhz)
+{
+	struct esp_spi_context *spi_ctx = adapter->if_context;
+
+	adjust_spi_clock(spi_ctx, spi_clk_mhz);
+
+	return 0;
+}
 
 int esp_init_interface_layer(struct esp_adapter *adapt)
 {

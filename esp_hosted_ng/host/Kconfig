@@ -18,6 +18,10 @@ config ESP_HOSTED_NG_SPI
 	select SPI_MASTER
 	select ESPRESSIF_ESP_HOSTED_NG
 
+config ESP_HOSTED_NG_AP_SUPPORT
+	bool "-- Support for AP-mode"
+	depends on ESPRESSIF_ESP_HOSTED_NG
+
 config ESP_HOSTED_NG_TEST_RAW_TP
 	bool "-- Raw Throughput testing"
 	depends on ESPRESSIF_ESP_HOSTED_NG

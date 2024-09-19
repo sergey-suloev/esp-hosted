@@ -28,6 +28,10 @@ ifneq ($(filter $(CONFIG_ESP_HOSTED_NG_SPI),y m),)
 	$(mod_name_spi)-objs += spi/esp_spi.o
 endif
 
+ifeq ($(CONFIG_ESP_HOSTED_NG_AP_SUPPORT), y)
+	ccflags-y += -DCONFIG_AP_MODE
+endif
+
 log_level := $(CONFIG_ESP_HOSTED_NG_LOG_LEVEL)
 log_debug := 3
 is_debug := $(shell echo ${log_level}\>=${log_debug} | bc)
