@@ -45,7 +45,6 @@ static void adjust_spi_clock(struct esp_spi_context *spi_ctx, u8 spi_clk_mhz);
 volatile u8 data_path;
 volatile u8 host_sleep;
 static struct esp_adapter *adapter;
-static char hardware_type = ESP_FIRMWARE_CHIP_UNRECOGNIZED;
 static atomic_t tx_pending;
 
 static struct esp_if_ops if_ops = {
@@ -363,7 +362,7 @@ static void esp_spi_work(struct work_struct *work)
 			trans.len = SPI_BUF_SIZE;
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 15, 0)) && ALLOW_CS_CHANGE
-			if (hardware_type == ESP_FIRMWARE_CHIP_ESP32) {
+			if (spi_ctx->adapter->chipset == ESP_FIRMWARE_CHIP_ESP32) {
 				trans.cs_change = 1;
 			}
 #endif
