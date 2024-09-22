@@ -34,6 +34,14 @@ menu "Example Configuration"
         help
             SPI controller to be used. HSPI->2, VSPI->3
 
+    config ESP_SPI_CONTROLLER_MODE
+        int "SPI controller mode to use"
+        depends on ESP_SPI_HOST_INTERFACE
+        default 2
+        range 0 3
+        help
+            SPI controller mode to be used.
+
     config ESP_SPI_GPIO_HANDSHAKE
         int "GPIO pin for handshake"
         default 3 if IDF_TARGET_ESP32C2
