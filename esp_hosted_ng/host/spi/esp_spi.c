@@ -391,11 +391,13 @@ static void esp_spi_work(struct work_struct *work)
 
 static void adjust_spi_clock(struct esp_spi_context *spi_ctx, u8 spi_clk_mhz)
 {
+#if ALLOW_ADJUST_SPI_CLOCK
 	if ((spi_clk_mhz) && (spi_clk_mhz != spi_ctx->spi_clk_mhz)) {
 		esp_info("ESP Reconfigure SPI CLK to %u MHz\n", spi_clk_mhz);
 		spi_ctx->spi_clk_mhz = spi_clk_mhz;
 		spi_ctx->spi->max_speed_hz = spi_clk_mhz * NUMBER_1M;
 	}
+#endif
 }
 
 static void esp_hw_reset(struct esp_spi_context *spi_ctx)
