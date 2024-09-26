@@ -339,7 +339,7 @@ int process_event_esp_bootup(struct esp_adapter *adapter, u8 *evt_buf, u8 len)
 			atomic_set(&adapter->state, ESP_CONTEXT_DISABLED);
 			generate_slave_intr(&adapter->if_context, BIT(ESP_CLOSE_DATA_PATH));
 		}
-		esp_err("network iterface init failed\n");
+		esp_err("network interface init failed\n");
 		return -1;
 	}
 	init_bt(adapter);
@@ -400,7 +400,7 @@ static int esp_set_mac_address(struct net_device *ndev, void *data)
 	ret = cmd_set_mac(priv, sa->sa_data);
 
 	if (ret == 0)
-		eth_hw_addr_set(ndev, priv->mac_address/*mac_addr->sa_data*/);
+		ETH_HW_ADDR_SET(ndev, priv->mac_address/*mac_addr->sa_data*/);
 
 	return ret;
 }

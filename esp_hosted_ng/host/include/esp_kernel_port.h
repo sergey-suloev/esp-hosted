@@ -142,12 +142,6 @@ enum ieee80211_privacy {
 
 #endif
 
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0))
-    #define ESP_CANCEL_SCHED_SCAN() cfg80211_sched_scan_stopped(priv->wdev.wiphy, 0);
-#else
-    #define ESP_CANCEL_SCHED_SCAN() cfg80211_sched_scan_stopped(priv->wdev.wiphy);
-#endif
-
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
 static inline void *skb_put_data(struct sk_buff *skb, const void *data,
 				 unsigned int len)
@@ -223,11 +217,18 @@ static inline bool wireless_dev_current_bss_exists(struct wireless_dev *wdev)
 #define ZERO_LINK_ID
 #endif
 
+/* In kernel version 5.15 and later, eth_hw_addr_set() is provided by the kernel.
+ * However, in LTS kernels, this function has been backported in later releases.
+ * To maintain compatibility with older kernels (pre-5.15), we define a macro
+ * ETH_HW_ADDR_SET that either uses ether_addr_copy function equivalent (ether_addr_copy)
+ * for kernels < 5.15 or the kernel-provided eth_hw_addr_set() for 5.15 and above.
+ */
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(5, 15, 0))
-static inline void eth_hw_addr_set(struct net_device *dev, const u8 *addr)
-{
-	ether_addr_copy(dev->dev_addr, addr);
-}
+/* For kernel versions < 5.15, use ether_addr_copy() to set the hardware address. */
+#define ETH_HW_ADDR_SET(dev, addr) ether_addr_copy((dev)->dev_addr, (addr))
+#else
+/* For kernel versions >= 5.15, use the kernel-provided eth_hw_addr_set(). */
+#define ETH_HW_ADDR_SET(dev, addr) eth_hw_addr_set(dev, addr)
 #endif
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 9, 0))
