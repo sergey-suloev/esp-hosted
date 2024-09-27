@@ -8,7 +8,6 @@
 #include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/mutex.h>
-#include <linux/delay.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/spi/spi.h>
@@ -44,7 +43,6 @@ static void adjust_spi_clock(struct esp_spi_context *spi_ctx, u8 spi_clk_mhz);
 
 volatile u8 data_path;
 volatile u8 host_sleep;
-static struct esp_adapter *adapter;
 static atomic_t tx_pending;
 
 static struct esp_if_ops if_ops = {
@@ -240,6 +238,9 @@ static int process_rx_buf(struct esp_spi_context *spi_ctx, struct sk_buff *skb)
 
 	header = (struct esp_payload_header *) skb->data;
 
+	esp_verbose("SPI RX buf: IF type = %d\n", header->if_type);
+	esp_hex_dump_verbose("SPI RX buf: ", skb->data , min(skb->len, 32));
+
 	if (header->if_type >= ESP_MAX_IF) {
 		return -EINVAL;
 	}
@@ -303,6 +304,9 @@ static void esp_spi_work(struct work_struct *work)
 
 	trans_ready = gpiod_get_value(spi_ctx->handshake);
 	rx_pending = gpiod_get_value(spi_ctx->data_ready);
+
+	esp_verbose("SPI work: handshake %d, data_ready %d, data_path %d\n",
+		trans_ready, rx_pending, data_path);
 
 	if (trans_ready) {
 		if (data_path) {
@@ -401,14 +405,17 @@ static void adjust_spi_clock(struct esp_spi_context *spi_ctx, u8 spi_clk_mhz)
 
 static void esp_hw_reset(struct esp_spi_context *spi_ctx)
 {
-	gpiod_direction_output(spi_ctx->reset, 1);
+//	gpiod_direction_output(spi_ctx->reset, 1);
 
-	// Set HOST's resetpin set to LOW
+	// Set HOST's resetpin to LOW
 	gpiod_set_value(spi_ctx->reset, 0);
-	usleep_range(1000,2000);
+	usleep_range(2000,4000);
 
 	// Set HOST's resetpin set to IN mode
-	gpiod_direction_input(spi_ctx->reset);
+//	gpiod_direction_input(spi_ctx->reset);
+
+	// Set HOST's resetpin to HIGH
+	gpiod_set_value(spi_ctx->reset, 1);
 
 	// Wait for ESP to start
 	msleep(200);
@@ -421,7 +428,7 @@ static int esp_spi_probe(struct spi_device *spi)
 	struct device *dev = &spi->dev;
 	struct esp_spi_context *spi_ctx;
 
-	esp_dbg("Probing ESP32 SPI-driver...\n");
+	esp_dbg("Probing ESP SPI-driver...\n");
 
 	spi_ctx = devm_kzalloc(dev, sizeof(*spi_ctx), GFP_KERNEL);
 	if (!spi_ctx)
@@ -429,10 +436,10 @@ static int esp_spi_probe(struct spi_device *spi)
 	spi_set_drvdata(spi, spi_ctx);
 
 	spi_ctx->spi = spi;
-	spi_ctx->adapter = adapter;
 	spi_ctx->spi_clk_mhz = spi->max_speed_hz / NUMBER_1M;
-	adapter->if_context = spi_ctx;
-	adapter->dev = dev;
+	spi_ctx->adapter = esp_get_adapter();
+	spi_ctx->adapter->if_context = spi_ctx;
+	spi_ctx->adapter->dev = dev;
 
 	spi_ctx->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(spi_ctx->reset)) {
@@ -519,9 +526,9 @@ static int esp_spi_probe(struct spi_device *spi)
 
 	open_data_path();
 
-	atomic_set(&adapter->state, ESP_CONTEXT_READY);
+	atomic_set(&spi_ctx->adapter->state, ESP_CONTEXT_READY);
 
-	esp_dbg("Probe success.\n");
+	esp_dbg("ESP SPI-driver probe success\n");
 	return 0;
 }
 
@@ -534,7 +541,6 @@ static void esp_spi_remove(struct spi_device *spi)
 	disable_irq(gpiod_to_irq(spi_ctx->handshake));
 	disable_irq(gpiod_to_irq(spi_ctx->data_ready));
 	close_data_path();
-	msleep(200);
 
 	for (prio_q_idx=0; prio_q_idx<MAX_PRIORITY_QUEUES; prio_q_idx++) {
 		skb_queue_purge(&spi_ctx->tx_q[prio_q_idx]);
@@ -589,14 +595,13 @@ int esp_adjust_spi_clock(struct esp_adapter *adapter, u8 spi_clk_mhz)
 	return 0;
 }
 
-int esp_init_interface_layer(struct esp_adapter *adapt)
+int esp_init_interface_layer(struct esp_adapter *adapter)
 {
 	int ret;
 
-	if (!adapt)
+	if (!adapter)
 		return -EINVAL;
 
-	adapter = adapt;
 	adapter->if_ops = &if_ops;
 	adapter->if_type = ESP_IF_TYPE_SPI;
 

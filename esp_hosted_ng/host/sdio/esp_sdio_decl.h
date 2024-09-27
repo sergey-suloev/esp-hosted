@@ -74,12 +74,12 @@
 #define ESP_DEVICE_ID_ESP32C6_2     0x7777
 
 struct esp_sdio_context {
-	struct esp_adapter     *adapter;
-	struct sdio_func       *func;
-	struct sk_buff_head    tx_q[MAX_PRIORITY_QUEUES];
-	u32                    rx_byte_count;
-	u32                    tx_buffer_count;
-	u32			sdio_clk_mhz;
+	struct esp_adapter	*adapter;
+	struct sdio_func	*func;
+	struct sk_buff_head	tx_q[MAX_PRIORITY_QUEUES];
+	u32		rx_byte_count;
+	u32		tx_buffer_count;
+	u32		sdio_clk_mhz;
 };
 
 #endif
