@@ -667,6 +667,21 @@ static void set_gpio_cd_pin(void)
 #endif
 }
 
+static void set_gpio_act_led(void)
+{
+#if CONFIG_BOARD_ACT_LED_ENABLED
+	gpio_config_t io_conf;
+	io_conf.intr_type = GPIO_INTR_DISABLE;
+	io_conf.mode = GPIO_MODE_OUTPUT;
+	io_conf.pin_bit_mask = (1ULL << CONFIG_BOARD_ACT_LED_PIN_GPIO);
+	io_conf.pull_down_en = 0;
+	io_conf.pull_up_en = 0;
+	gpio_config(&io_conf);
+
+	gpio_set_level(CONFIG_BOARD_ACT_LED_PIN_GPIO, 0);
+#endif
+}
+
 void app_main()
 {
 	esp_err_t ret;
@@ -738,6 +753,8 @@ void app_main()
 	create_debugging_tasks();
 
 	set_gpio_cd_pin();
+
+	set_gpio_act_led();
 
 	/* send capabilities to host */
 	if (datapath || xSemaphoreTake(init_sem, portMAX_DELAY))

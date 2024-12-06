@@ -1588,16 +1588,21 @@ int process_set_mac(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
 	} else {
 		wifi_if_type = WIFI_IF_AP;
 	}
+
 	memcpy(dev_mac, mac->mac_addr, MAC_ADDR_LEN);
 
+#if CONFIG_ESP_SET_CUSTOM_MAC
+	esp_efuse_mac_get_custom(dev_mac);
+#endif
+
 	ESP_LOGI(TAG, "Setting mac address \n");
-	ret = esp_wifi_set_mac(wifi_if_type, mac->mac_addr);
+	ret = esp_wifi_set_mac(wifi_if_type, dev_mac);
 
 	if (ret) {
 		ESP_LOGE(TAG, "Failed to set mac address\n");
 		cmd_status = CMD_RESPONSE_FAIL;
 	}
-	ret = send_command_resp(if_type, CMD_SET_MAC, cmd_status, (uint8_t *)mac->mac_addr,
+	ret = send_command_resp(if_type, CMD_SET_MAC, cmd_status, (uint8_t *)dev_mac,
 				MAC_ADDR_LEN, sizeof(struct command_header));
 	return ret;
 }

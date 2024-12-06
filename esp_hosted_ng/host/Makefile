@@ -1,73 +1,45 @@
-CONFIG_ENABLE_MONITOR_PROCESS = n
+ifneq ($(filter $(CONFIG_ESPRESSIF_ESP_HOSTED_NG),y m),)
 
-# Toolchain Path
-CROSS_COMPILE :=
-# Linux Kernel header
-KERNEL := /lib/modules/$(shell uname -r)/build
-# Architecture
-ARCH := $(shell uname -m)
+mod_name_sdio = esp32_sdio
+mod_name_spi = esp32_spi
 
-# Check and adjust ARCH for specific cases
-ifeq ($(ARCH), x86_64)
-    ARCH := x86
+ccflags-y += -I$(src)/include -I$(src)
+
+mod_objects = \
+	esp_bt.o \
+	esp_cmd.o \
+	esp_utils.o \
+	esp_cfg80211.o \
+	esp_stats.o \
+	esp_debugfs.o \
+	esp_log.o \
+	main.o \
+
+$(mod_name_sdio)-objs := $(mod_objects)
+$(mod_name_spi)-objs := $(mod_objects)
+
+ifneq ($(filter $(CONFIG_ESP_HOSTED_NG_SDIO),y m),)
+	ccflags-y += -I$(src)/sdio
+	$(mod_name_sdio)-objs += sdio/esp_sdio.o sdio/esp_sdio_api.o
 endif
 
-ifeq ($(ARCH), aarch64)
-    ARCH := arm64
+ifneq ($(filter $(CONFIG_ESP_HOSTED_NG_SPI),y m),)
+	ccflags-y += -I$(src)/spi
+	$(mod_name_spi)-objs += spi/esp_spi.o
 endif
 
-#Default interface is sdio
-MODULE_NAME=esp32_sdio
-
-#enable logging by default
-CONFIG_DEBUG_LOGS := y
-
-ifeq ($(CONFIG_AP_SUPPORT), y)
-	EXTRA_CFLAGS += -DCONFIG_AP_MODE
+ifeq ($(CONFIG_ESP_HOSTED_NG_AP_SUPPORT), y)
+	ccflags-y += -DCONFIG_AP_MODE
 endif
 
-#Targets passed overrrides default value
-ifeq ($(target), sdio)
-	MODULE_NAME=esp32_sdio
+log_level := $(CONFIG_ESP_HOSTED_NG_LOG_LEVEL)
+log_debug := 3
+is_debug := $(shell echo ${log_level}\>=${log_debug} | bc)
+ifeq ($(is_debug),1)
+	ccflags-y += -DDEBUG
 endif
 
-ifeq ($(target), spi)
-	MODULE_NAME=esp32_spi
+obj-$(CONFIG_ESP_HOSTED_NG_SDIO) += $(mod_name_sdio).o
+obj-$(CONFIG_ESP_HOSTED_NG_SPI) += $(mod_name_spi).o
+
 endif
-
-ifeq ($(CONFIG_ENABLE_MONITOR_PROCESS), y)
-	EXTRA_CFLAGS += -DCONFIG_ENABLE_MONITOR_PROCESS
-endif
-
-#debug_flags := -DDEBUG
-
-EXTRA_CFLAGS += -I$(PWD)/include -I$(PWD)
-
-ifeq ($(MODULE_NAME), esp32_sdio)
-	EXTRA_CFLAGS += -I$(PWD)/sdio
-	module_objects += sdio/esp_sdio.o sdio/esp_sdio_api.o
-endif
-
-ifeq ($(MODULE_NAME), esp32_spi)
-	EXTRA_CFLAGS += -I$(PWD)/spi
-	module_objects += spi/esp_spi.o
-endif
-
-module_objects += esp_bt.o main.o esp_cmd.o esp_utils.o esp_cfg80211.o esp_stats.o esp_debugfs.o esp_log.o
-#$(foreach obj,$(module_objects),$(eval CFLAGS_$(obj:.o=).o := $(debug_flags)))
-CFLAGS_esp_log.o = -DDEBUG
-
-PWD := $(shell pwd)
-
-obj-m := $(MODULE_NAME).o
-$(MODULE_NAME)-y := $(module_objects)
-
-all: clean
-	make ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) modules
-
-clean:
-	rm -rf *.o sdio/*.o spi/*.o *.ko
-	make ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) clean
-
-check:
-	make ARCH=$(ARCH) CROSS_COMPILE=$(CROSS_COMPILE) -C $(KERNEL) M=$(PWD) $(module_objects)
