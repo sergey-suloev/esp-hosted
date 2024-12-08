@@ -1591,7 +1591,7 @@ int process_set_mac(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
 
 	memcpy(dev_mac, mac->mac_addr, MAC_ADDR_LEN);
 
-#if CONFIG_ESP_USE_EFUSE_CUSTOM_MAC
+#if CONFIG_ESP_WIFI_SET_EFUSE_CUSTOM_MAC
 	esp_efuse_mac_get_custom(dev_mac);
 #endif
 

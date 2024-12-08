@@ -162,11 +162,11 @@ menu "Example Configuration"
         help
             UART Baudrate for HCI over ESP32C3/S3/C6. Please use standard baudrate.
 
-    config ESP_USE_EFUSE_CUSTOM_MAC
-        bool "Use efuse custom MAC-address"
+    config ESP_WIFI_SET_EFUSE_CUSTOM_MAC
+        bool "Set efuse custom MAC-address for WiFI interface"
         default y
         help
-            Set Y to use the ESP's efuse custom MAC-address.
+            Set Y to use the ESP's efuse custom MAC-address for WiFi interface.
 
     config BOARD_ACT_LED_ENABLED
         bool "Enable board activity LED"
