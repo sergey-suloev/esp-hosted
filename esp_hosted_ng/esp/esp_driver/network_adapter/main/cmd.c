@@ -58,8 +58,6 @@ extern uint8_t dev_mac[MAC_ADDR_LEN];
 
 uint8_t dummy_mac[] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
 uint8_t dummy_mac2[] = {0x00, 0x11, 0x22, 0x33, 0x44, 0x66};
-uint8_t *ap_rsn_ie;
-uint8_t ap_rsn_ie_len;
 
 int esp_wifi_register_wpa_cb_internal(struct wpa_funcs *cb);
 int esp_wifi_unregister_wpa_cb_internal(void);
@@ -542,6 +540,11 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
 		softap_started = 0;
 		break;
 
+	case WIFI_EVENT_STA_STOP:
+		ESP_LOGI(TAG, "Station stop");
+		sta_init_flag = 0;
+		break;
+
 	default:
 		ESP_LOGI(TAG, "Unregistered event: %lu\n", event_id);
 	}
@@ -762,13 +765,7 @@ static int wpa_ap_remove(uint8_t* bssid)
 
 static uint8_t  *wpa_ap_get_wpa_ie(uint8_t *ie_len)
 {
-	if (ap_rsn_ie) {
-		*ie_len = ap_rsn_ie_len;
-		return ap_rsn_ie;
-	}
-
 	*ie_len = 0;
-
 	return NULL;
 }
 
@@ -1713,7 +1710,6 @@ static int set_key_internal(void *data)
 		if (iface == WIFI_IF_AP) {
 			ret = esp_wifi_set_ap_key_internal(key->algo, key->mac_addr, key->index,
 						key->data, key->len);
-			esp_wifi_wpa_ptk_init_done_internal(key->mac_addr);
 		} else {
 			ret = esp_wifi_set_sta_key_internal(key->algo, key->mac_addr, key->index,
 				1, key->seq, key->seq_len, key->data, key->len, 
@@ -1828,26 +1824,24 @@ int process_set_ie(uint8_t if_type, uint8_t *payload, uint16_t payload_len)
 	if (ie->ie_type == IE_BEACON) {
 		type = WIFI_APPIE_RAM_BEACON;
 		ESP_LOG_BUFFER_HEXDUMP("BEACON", (uint8_t *) ie->ie, ie->ie_len, ESP_LOG_INFO);
+	} else if (ie->ie_type == IE_BEACON_PROBE_HEAD) {
+		type = WIFI_APPIE_RAM_BEACON_PROBE_HEAD;
+		ESP_LOG_BUFFER_HEXDUMP("BEACON_PROBE_HEAD", (uint8_t *) ie->ie, ie->ie_len, ESP_LOG_INFO);
+	} else if (ie->ie_type == IE_BEACON_PROBE_TAIL) {
+		type = WIFI_APPIE_RAM_BEACON_PROBE_TAIL;
+		ESP_LOG_BUFFER_HEXDUMP("BEACON_PROBE_TAIL", (uint8_t *) ie->ie, ie->ie_len, ESP_LOG_INFO);
 	} else if (ie->ie_type == IE_PROBE_RESP) {
 		type = WIFI_APPIE_RAM_PROBE_RSP;
 		ESP_LOG_BUFFER_HEXDUMP("PROBE", (uint8_t *) ie->ie, ie->ie_len, ESP_LOG_INFO);
 	} else if (ie->ie_type == IE_ASSOC_RESP) {
 		type = WIFI_APPIE_ASSOC_RESP;
-	} else if (ie->ie_type == IE_RSN) {
-		if (ap_rsn_ie)
-			free(ap_rsn_ie);
-		ap_rsn_ie = malloc(ie->ie_len);
-		memcpy(ap_rsn_ie, ie->ie, ie->ie_len);
-		ap_rsn_ie_len = ie->ie_len;
-		/* ESP_LOG_BUFFER_HEXDUMP("RSN IE", (uint8_t *) ie->ie, ie->ie_len, ESP_LOG_INFO); */
 	} else {
 		cmd_status = CMD_RESPONSE_INVALID;
 		goto send_resp;
 	}
 
-	if (ie->ie_type != IE_RSN) {
-		ret = esp_wifi_set_appie_internal(type, ie->ie, ie->ie_len, 0);
-	}
+	ret = esp_wifi_set_appie_internal(type, ie->ie, ie->ie_len, 0);
+
 	if (ret) {
 		cmd_status = CMD_RESPONSE_INVALID;
 	}
@@ -1914,15 +1908,6 @@ int process_set_ap_config(uint8_t if_type, uint8_t *payload, uint16_t payload_le
 	wifi_config.ap.ssid_hidden = ap_config->ap_config.ssid_hidden;
 	wifi_config.ap.beacon_interval = ap_config->ap_config.beacon_interval;
 //	wifi_config.ap.pairwise_cipher = ap_config->ap_config.pairwise_cipher;
-	if (ap_config->ap_config.authmode != WIFI_AUTH_OPEN) {
-		strcpy((char *)wifi_config.ap.password, "1234567890");
-	} else {
-		ap_rsn_ie_len = 0;
-		if (ap_rsn_ie) {
-			free(ap_rsn_ie);
-			ap_rsn_ie = NULL;
-		}
-	}
 
 	ESP_LOGI(TAG, "ap config ssid=%s ssid_len=%d, pass=%s channel=%d authmode=%d hidden=%d bi=%d cipher=%d\n",
 			wifi_config.ap.ssid, wifi_config.ap.ssid_len,
@@ -2045,10 +2030,17 @@ int add_station_node_ap(void *data)
 	ESP_LOG_BUFFER_HEXDUMP("ht_rates", sta->sta_param.ht_caps, 28, ESP_LOG_INFO);
 	ESP_LOG_BUFFER_HEXDUMP("vht_rates", sta->sta_param.vht_caps, 14, ESP_LOG_INFO);
 	ESP_LOG_BUFFER_HEXDUMP("he_rates", sta->sta_param.he_caps, 27, ESP_LOG_INFO);
+
+#define STA_FLAG_AUTHORIZED 1
 	if (sta->sta_param.cmd != ADD_STA) {
-		ESP_LOGI(TAG, "%s: not station add cmd, handle later\n", __func__);
-		return 0;
-	}
+	    ESP_LOGD(TAG,"sta_flags_set=%ld, sta_flags_mask=%ld sta_modify_mask=%ld\n", sta->sta_param.sta_flags_set, sta->sta_param.sta_flags_mask, sta->sta_param.sta_modify_mask);
+            if (sta->sta_param.sta_flags_set & BIT(STA_FLAG_AUTHORIZED)) {
+		ESP_LOGI(TAG, "%s: authrizing station\n", __func__);
+		esp_wifi_wpa_ptk_init_done_internal(sta->sta_param.mac);
+            }
+	    ESP_LOGI(TAG, "%s: not station add cmd, handle later\n", __func__);
+	    return 0;
+        }
 	return ieee80211_add_node(WIFI_IF_AP, sta->sta_param.mac, sta->sta_param.aid,
 			sta->sta_param.supported_rates[0] ? sta->sta_param.supported_rates : NULL,
 			sta->sta_param.ht_caps[0] ? sta->sta_param.ht_caps : NULL,
