@@ -5,7 +5,9 @@
  * SPDX-FileCopyrightText: 2015-2023 Espressif Systems (Shanghai) CO LTD
  *
  */
-#include "utils.h"
+
+#include <linux/device.h>
+#include <linux/kthread.h>
 #include <linux/mutex.h>
 #include <linux/mmc/sdio.h>
 #include <linux/mmc/sdio_func.h>
@@ -13,14 +15,17 @@
 #include <linux/mmc/card.h>
 #include <linux/mmc/host.h>
 #include <linux/module.h>
-#include "esp_if.h"
-#include "esp_sdio_api.h"
+#include <linux/of.h>
 #include "esp_api.h"
 #include "esp_bt_api.h"
-#include <linux/kthread.h>
+#include "esp_fw_version.h"
+#include "esp_if.h"
+#include "esp_kernel_port.h"
+#include "esp_sdio_api.h"
 #include "esp_stats.h"
 #include "esp_utils.h"
-#include "include/esp_kernel_port.h"
+#include "main.h"
+#include "utils.h"
 
 extern u32 raw_tp_mode;
 #define MAX_WRITE_RETRIES       2
@@ -32,24 +37,17 @@ extern u32 raw_tp_mode;
 	esp_err("CMD53 read/write error at %d\n", __LINE__);	\
 } while (0);
 
-struct esp_sdio_context sdio_context;
 static atomic_t tx_pending;
 static atomic_t queue_items[MAX_PRIORITY_QUEUES];
+
 struct task_struct *tx_thread;
+
 volatile u8 host_sleep;
 
 static int init_context(struct esp_sdio_context *context);
 static struct sk_buff *read_packet(struct esp_adapter *adapter);
 static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb);
-/*int deinit_context(struct esp_adapter *adapter);*/
 
-static const struct sdio_device_id esp_devices[] = {
-	{ SDIO_DEVICE(ESP_VENDOR_ID_1, ESP_DEVICE_ID_ESP32_1) },
-	{ SDIO_DEVICE(ESP_VENDOR_ID_1, ESP_DEVICE_ID_ESP32_2) },
-	{ SDIO_DEVICE(ESP_VENDOR_ID_2, ESP_DEVICE_ID_ESP32C6_1) },
-	{ SDIO_DEVICE(ESP_VENDOR_ID_2, ESP_DEVICE_ID_ESP32C6_2) },
-	{}
-};
 
 static void esp_process_interrupt(struct esp_sdio_context *context, u32 int_status)
 {
@@ -62,9 +60,9 @@ static void esp_process_interrupt(struct esp_sdio_context *context, u32 int_stat
 	}
 }
 
-static void esp_handle_isr(struct sdio_func *func)
+static void esp_handle_irq(struct sdio_func *func)
 {
-	struct esp_sdio_context *context = NULL;
+	struct esp_sdio_context *context;
 	u32 *int_status;
 	int ret;
 
@@ -109,7 +107,6 @@ int generate_slave_intr(void *context, u8 data)
 	u8 *val;
 	int ret = 0;
 
-	context = (struct esp_sdio_context*) context;
 	if (!context)
 		return -EINVAL;
 
@@ -253,7 +250,7 @@ static void esp_remove(struct sdio_func *func)
 
 	if (context) {
 		for (prio_q_idx = 0; prio_q_idx < MAX_PRIORITY_QUEUES; prio_q_idx++)
-			skb_queue_purge(&(sdio_context.tx_q[prio_q_idx]));
+			skb_queue_purge(&(context->tx_q[prio_q_idx]));
 	}
 
 	if (tx_thread)
@@ -351,13 +348,14 @@ static int init_context(struct esp_sdio_context *context)
 		esp_err("Failed to get adapter\n");
 
 	for (prio_q_idx = 0; prio_q_idx < MAX_PRIORITY_QUEUES; prio_q_idx++) {
-		skb_queue_head_init(&(sdio_context.tx_q[prio_q_idx]));
+		skb_queue_head_init(&(context->tx_q[prio_q_idx]));
 		atomic_set(&queue_items[prio_q_idx], 0);
 	}
 
-	context->adapter->if_type = ESP_IF_TYPE_SDIO;
+	context->adapter->if_context = context;
+	context->adapter->dev = &context->func->dev;
 
-	return ret;
+	return 0;
 }
 
 static struct sk_buff *read_packet(struct esp_adapter *adapter)
@@ -460,6 +458,7 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 	struct esp_payload_header *payload_header = (struct esp_payload_header *) skb->data;
 	struct esp_skb_cb *cb = NULL;
 	uint8_t prio = PRIO_Q_LOW;
+	struct esp_sdio_context *context;
 
 	if (!adapter || !adapter->if_context || !skb || !skb->data || !skb->len) {
 		esp_err("Invalid args\n");
@@ -470,6 +469,8 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 
 		return -EINVAL;
 	}
+
+	context = adapter->if_context;
 
 	if (skb->len > max_pkt_size) {
 		esp_err("Drop pkt of len[%u] > max SDIO transport len[%u]\n",
@@ -500,19 +501,18 @@ static int write_packet(struct esp_adapter *adapter, struct sk_buff *skb)
 		prio = PRIO_Q_LOW;
 
 	atomic_inc(&queue_items[prio]);
-	skb_queue_tail(&(sdio_context.tx_q[prio]), skb);
+	skb_queue_tail(&(context->tx_q[prio]), skb);
 
 	return 0;
 }
 
-static int is_sdio_write_buffer_available(u32 buf_needed)
+static int is_sdio_write_buffer_available(struct esp_sdio_context *context, u32 buf_needed)
 {
 #define BUFFER_AVAILABLE        1
 #define BUFFER_UNAVAILABLE      0
 
 	int ret = 0;
 	static u32 buf_available;
-	struct esp_sdio_context *context = &sdio_context;
 	u8 retry = MAX_WRITE_RETRIES;
 
 	/*If buffer needed are less than buffer available
@@ -553,7 +553,7 @@ static int tx_process(void *data)
 	u32 data_left, len_to_send, pad;
 	struct sk_buff *tx_skb = NULL;
 	struct esp_adapter *adapter = (struct esp_adapter *) data;
-	struct esp_sdio_context *context = NULL;
+	struct esp_sdio_context *context;
 	struct esp_skb_cb *cb = NULL;
 	u8 retry;
 
@@ -561,7 +561,7 @@ static int tx_process(void *data)
 
 	while (!kthread_should_stop()) {
 
-		if (atomic_read(&context->adapter->state) < ESP_CONTEXT_READY) {
+		if (atomic_read(&adapter->state) < ESP_CONTEXT_READY) {
 			msleep(10);
 			esp_dbg("not ready\n");
 			continue;
@@ -620,7 +620,7 @@ static int tx_process(void *data)
 
 		/*If SDIO slave buffer is available to write then only write data
 		else wait till buffer is available*/
-		ret = is_sdio_write_buffer_available(buf_needed);
+		ret = is_sdio_write_buffer_available(context, buf_needed);
 		if (!ret) {
 			dev_kfree_skb(tx_skb);
 			continue;
@@ -668,13 +668,22 @@ static int tx_process(void *data)
 
 static struct esp_sdio_context *init_sdio_func(struct sdio_func *func, int *sdio_ret)
 {
-	struct esp_sdio_context *context = NULL;
+	struct esp_sdio_context *context;
 	int ret = 0;
 
 	if (!func)
 		return NULL;
 
-	context = &sdio_context;
+	context = devm_kzalloc(&func->dev, sizeof(*context), GFP_KERNEL);
+	if (!context) {
+		*sdio_ret = -ENOMEM;
+		return NULL;
+	}
+
+	ret = device_property_read_u32(&func->dev, "sdio-clk-mhz",
+				&context->sdio_clk_mhz);
+	if (ret < 0)
+		esp_warn("sdio-clk-mhz was not specified\n");
 
 	context->func = func;
 
@@ -692,7 +701,7 @@ static struct esp_sdio_context *init_sdio_func(struct sdio_func *func, int *sdio
 	}
 
 	/* Register IRQ */
-	ret = sdio_claim_irq(func, esp_handle_isr);
+	ret = sdio_claim_irq(func, esp_handle_irq);
 	if (ret) {
 		esp_err("sdio_claim_irq ret: %d\n", ret);
 		sdio_disable_func(func);
@@ -715,8 +724,10 @@ static struct esp_sdio_context *init_sdio_func(struct sdio_func *func, int *sdio
 static int esp_probe(struct sdio_func *func,
 				  const struct sdio_device_id *id)
 {
-	struct esp_sdio_context *context = NULL;
+	struct esp_sdio_context *context;
 	int ret = 0;
+
+	esp_dbg("Probing ESP-SDIO driver...\n");
 
 	if (func->num != 1) {
 		return -EINVAL;
@@ -724,7 +735,7 @@ static int esp_probe(struct sdio_func *func,
 
 	esp_info("ESP network device detected\n");
 
-	context = init_sdio_func(func, &ret);;
+	context = init_sdio_func(func, &ret);
 	atomic_set(&tx_pending, 0);
 
 	if (!context) {
@@ -734,9 +745,9 @@ static int esp_probe(struct sdio_func *func,
 			return -EINVAL;
 	}
 
-	if (sdio_context.sdio_clk_mhz) {
+	if (context->sdio_clk_mhz) {
 		struct mmc_host *host = func->card->host;
-		u32 hz = sdio_context.sdio_clk_mhz * NUMBER_1M;
+		u32 hz = context->sdio_clk_mhz * NUMBER_1M;
 		/* Expansion of mmc_set_clock that isnt exported */
 		if (hz < host->f_min)
 			hz = host->f_min;
@@ -757,20 +768,19 @@ static int esp_probe(struct sdio_func *func,
 	if (!tx_thread)
 		esp_err("Failed to create esp_sdio TX thread\n");
 
-	context->adapter->dev = &func->dev;
 	atomic_set(&context->adapter->state, ESP_CONTEXT_RX_READY);
 	generate_slave_intr(context, BIT(ESP_OPEN_DATA_PATH));
 
 
 	esp_dbg("ESP SDIO probe completed\n");
 
-	return ret;
+	return 0;
 }
 
 static int esp_suspend(struct device *dev)
 {
-	struct sdio_func *func = NULL;
-	struct esp_sdio_context *context = NULL;
+	struct sdio_func	*func;
+	struct esp_sdio_context *context;
 
 	if (!dev) {
 		esp_info("Failed to inform ESP that host is suspending\n");
@@ -805,8 +815,8 @@ static int esp_suspend(struct device *dev)
 
 static int esp_resume(struct device *dev)
 {
-	struct sdio_func *func = NULL;
-	struct esp_sdio_context *context = NULL;
+	struct sdio_func	*func;
+	struct esp_sdio_context *context;
 
 	if (!dev) {
 		esp_info("Failed to inform ESP that host is awake\n");
@@ -843,37 +853,51 @@ static const struct dev_pm_ops esp_pm_ops = {
 	.resume = esp_resume,
 };
 
-static const struct of_device_id esp_sdio_of_match[] = {
-	{ .compatible = "espressif,esp_sdio", },
+static const struct sdio_device_id esp_sdio_ids[] = {
+	{ SDIO_DEVICE(ESP_VENDOR_ID_1, ESP_DEVICE_ID_ESP32_1) },
+	{ SDIO_DEVICE(ESP_VENDOR_ID_1, ESP_DEVICE_ID_ESP32_2) },
+	{ SDIO_DEVICE(ESP_VENDOR_ID_2, ESP_DEVICE_ID_ESP32C6_1) },
+	{ SDIO_DEVICE(ESP_VENDOR_ID_2, ESP_DEVICE_ID_ESP32C6_2) },
+	{}
+};
+MODULE_DEVICE_TABLE(sdio, esp_sdio_ids);
+
+static const struct of_device_id esp_sdio_dt_ids[] = {
+	{ .compatible = "espressif,esp32-sdio" },
 	{ /* sentinel */ }
 };
-MODULE_DEVICE_TABLE(of, esp_sdio_of_match);
+MODULE_DEVICE_TABLE(of, esp_sdio_dt_ids);
 
 /* SDIO driver structure to be registered with kernel */
 static struct sdio_driver esp_sdio_driver = {
-	.name		= KBUILD_MODNAME,
-	.id_table	= esp_devices,
+	.drv = {
+		.name = "esp32_sdio",
+		.pm = &esp_pm_ops,
+		.of_match_table = of_match_ptr(esp_sdio_dt_ids),
+	},
+	.name		= "esp32_sdio",
+	.id_table	= esp_sdio_ids,
 	.probe		= esp_probe,
 	.remove		= esp_remove,
-	.drv = {
-		.name = KBUILD_MODNAME,
-		.owner = THIS_MODULE,
-		.pm = &esp_pm_ops,
-		.of_match_table = esp_sdio_of_match,
-	},
 };
 
-int esp_init_interface_layer(struct esp_adapter *adapter, u32 speed)
+int esp_init_interface_layer(struct esp_adapter *adapter)
 {
+	int ret;
+
 	if (!adapter)
 		return -EINVAL;
 
-	adapter->if_context = &sdio_context;
 	adapter->if_ops = &if_ops;
-	sdio_context.adapter = adapter;
-	sdio_context.sdio_clk_mhz = speed;
+	adapter->if_type = ESP_IF_TYPE_SDIO;
 
-	return sdio_register_driver(&esp_sdio_driver);
+	ret = sdio_register_driver(&esp_sdio_driver);
+	if (ret < 0) {
+		esp_err("Unable to register SDIO driver: ret=%d\n", ret);
+		return ret;
+	}
+
+	return 0;
 }
 
 int esp_validate_chipset(struct esp_adapter *adapter, u8 chipset)
@@ -913,3 +937,24 @@ void esp_deinit_interface_layer(void)
 {
 	sdio_unregister_driver(&esp_sdio_driver);
 }
+
+static int __init esp_sdio_init(void)
+{
+	return esp_init();
+}
+
+static void __exit esp_sdio_exit(void)
+{
+	esp_exit();
+}
+
+module_init(esp_sdio_init);
+module_exit(esp_sdio_exit);
+
+MODULE_LICENSE("GPL");
+MODULE_VERSION(RELEASE_VERSION);
+MODULE_DESCRIPTION("SDIO Driver for ESP-Hosted solution");
+MODULE_AUTHOR("Amey Inamdar <amey.inamdar@espressif.com>");
+MODULE_AUTHOR("Mangesh Malusare <mangesh.malusare@espressif.com>");
+MODULE_AUTHOR("Yogesh Mantri <yogesh.mantri@espressif.com>");
+MODULE_AUTHOR("Sergey Suloev <ssuloev@orpaltech.ru>");
