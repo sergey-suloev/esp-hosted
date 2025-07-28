@@ -104,7 +104,7 @@ static struct sk_buff *read_packet(struct esp_adapter *adapter)
 
 	context = adapter->if_context;
 
-	if (context->esp_spi_dev) {
+	if (context->spi) {
 		skb = skb_dequeue(&(context->rx_q[PRIO_Q_HIGH]));
 		if (!skb)
 			skb = skb_dequeue(&(context->rx_q[PRIO_Q_MID]));
@@ -588,6 +588,8 @@ int esp_adjust_spi_clock(struct esp_adapter *adapter, u8 spi_clk_mhz)
 	struct esp_spi_context *spi_ctx = adapter->if_context;
 
 	adjust_spi_clock(spi_ctx, spi_clk_mhz);
+
+	return 0;
 }
 
 int esp_init_interface_layer(struct esp_adapter *adapter)
