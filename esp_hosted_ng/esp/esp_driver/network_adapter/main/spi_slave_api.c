@@ -26,6 +26,7 @@
 #include "driver/gpio.h"
 #include "endian.h"
 #include "freertos/task.h"
+#include "freertos/timers.h"
 #include "stats.h"
 #include "soc/gpio_reg.h"
 #include "esp_fw_version.h"
@@ -49,8 +50,6 @@ static const char TAG[] = "FW_SPI";
 #define IS_SPI_DMA_ALIGNED(VAL) (!((VAL)& SPI_DMA_ALIGNMENT_MASK))
 #define MAKE_SPI_DMA_ALIGNED(VAL)  (VAL += SPI_DMA_ALIGNMENT_BYTES - \
                 ((VAL)& SPI_DMA_ALIGNMENT_MASK))
-
-uint8_t g_spi_mode = SPI_MODE_2;
 
 /* Chipset specific configurations */
 #ifdef CONFIG_IDF_TARGET_ESP32
@@ -153,6 +152,22 @@ uint8_t g_spi_mode = SPI_MODE_2;
 #define SPI_TX_QUEUE_SIZE       CONFIG_ESP_SPI_TX_Q_SIZE
 #define SPI_RX_QUEUE_SIZE       CONFIG_ESP_SPI_RX_Q_SIZE
 
+#define BIT_MASK(bit)		(1ULL << (bit))
+
+#define GPIO_PIN_SET(gpio_num)	WRITE_PERI_REG(GPIO_OUT_W1TS_REG, BIT_MASK(gpio_num))
+#define GPIO_PIN_CLR(gpio_num)	WRITE_PERI_REG(GPIO_OUT_W1TC_REG, BIT_MASK(gpio_num))
+
+/* Data Activity LED Configuration */
+#ifdef CONFIG_BOARD_ACT_LED_ENABLED
+static const uint8_t gpio_act_led = CONFIG_BOARD_ACT_LED_PIN_GPIO;
+
+static TimerHandle_t act_led_timer = NULL;
+/* This function runs automatically when traffic stops */
+static void act_led_off_callback(TimerHandle_t xTimer) {
+    GPIO_PIN_CLR(gpio_act_led);
+}
+#endif
+
 static interface_context_t context;
 static interface_handle_t if_handle_g;
 static uint8_t gpio_handshake = CONFIG_ESP_SPI_GPIO_HANDSHAKE;
@@ -164,7 +179,7 @@ static QueueHandle_t spi_tx_queue[MAX_PRIORITY_QUEUES] = {NULL};
 static SemaphoreHandle_t wait_cs_deassert_sem;
 #endif
 
-static interface_handle_t * esp_spi_init(void);
+static interface_handle_t *esp_spi_init(void);
 static int32_t esp_spi_write(interface_handle_t *handle,
                              interface_buffer_handle_t *buf_handle);
 static int esp_spi_read(interface_handle_t *if_handle, interface_buffer_handle_t * buf_handle);
@@ -311,7 +326,7 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
     xQueueSend(spi_tx_queue[PRIO_Q_HIGH], &buf_handle, portMAX_DELAY);
 
     /* indicate waiting data on ready pin */
-    WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1ULL << gpio_data_ready));
+    GPIO_PIN_SET(gpio_data_ready);
     /* process first data packet here to start transactions */
     queue_next_transaction();
 
@@ -322,7 +337,7 @@ esp_err_t send_bootup_event_to_host(uint8_t cap)
 static void IRAM_ATTR spi_post_setup_cb(spi_slave_transaction_t *trans)
 {
     /* ESP peripheral ready for spi transaction. Set hadnshake line high. */
-    WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1ULL << gpio_handshake));
+    GPIO_PIN_SET(gpio_handshake);
 }
 
 /* Invoked after transaction is sent/received.
@@ -331,7 +346,7 @@ static void IRAM_ATTR spi_post_trans_cb(spi_slave_transaction_t *trans)
 {
 #if !HS_DEASSERT_ON_CS
     /* Clear handshake line */
-    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_handshake));
+    GPIO_PIN_CLR(gpio_handshake);
 #endif
 }
 
@@ -366,7 +381,7 @@ static uint8_t * get_next_tx_buffer(uint32_t *len)
     }
 
     /* No real data pending, clear ready line and indicate host an idle state */
-    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_data_ready));
+    GPIO_PIN_CLR(gpio_data_ready);
 
     /* Create empty dummy buffer */
     sendbuf = heap_caps_malloc(RX_BUF_SIZE, MALLOC_CAP_DMA);
@@ -539,6 +554,28 @@ static void spi_transaction_post_process_task(void* pvParameters)
             continue;
         }
 
+#ifdef CONFIG_BOARD_ACT_LED_ENABLED
+	static int packet_count = 0;
+
+	// Only toggle the LED every 4 packets
+	// This creates visible "gaps" in the light even during heavy traffic
+	if (packet_count++ % 4 == 0) {
+	    // This will flip the state: if it's on, turn it off. If it's off, turn it on.
+	    static bool led_state = false;
+	    led_state = !led_state;
+
+	    if (led_state) {
+		GPIO_PIN_SET(gpio_act_led);
+	    } else {
+		GPIO_PIN_CLR(gpio_act_led);
+	    }
+	}
+	/* Kick the watchdog: Reset the timer every time we see activity */
+	if (act_led_timer) {
+	    xTimerReset(act_led_timer, 0);
+	}
+#endif
+
         /*ESP_LOG_BUFFER_HEXDUMP(TAG, spi_trans->tx_buffer, 32, ESP_LOG_INFO);*/
 
         /* Free any tx buffer, data is not relevant anymore */
@@ -567,7 +604,31 @@ static void spi_transaction_post_process_task(void* pvParameters)
     }
 }
 
-static interface_handle_t * esp_spi_init(void)
+static void IRAM_ATTR clear_handshake_isr_handler(void *arg)
+{
+    GPIO_PIN_CLR(gpio_handshake);
+}
+
+static void assign_pin_to_clear_handshake(uint32_t gpio_num)
+{
+    if (gpio_num != -1) {
+        gpio_reset_pin(gpio_num);
+
+        gpio_config_t pin_conf = {
+            .intr_type = GPIO_INTR_DISABLE,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = 1,
+            .pin_bit_mask = BIT_MASK(gpio_num)
+        };
+
+        gpio_config(&pin_conf);
+        gpio_set_intr_type(gpio_num, GPIO_INTR_NEGEDGE);
+        gpio_install_isr_service(0);
+        gpio_isr_handler_add(gpio_num, clear_handshake_isr_handler, NULL);
+    }
+}
+
+static interface_handle_t *esp_spi_init(void)
 {
     esp_err_t ret = ESP_OK;
     uint8_t prio_q_idx = 0;
@@ -589,10 +650,10 @@ static interface_handle_t * esp_spi_init(void)
 #endif
     };
 
-    ESP_LOGI(TAG, "Using SPI MODE %d", g_spi_mode);
+    ESP_LOGI(TAG, "Using SPI MODE %d", CONFIG_ESP_SPI_CONTROLLER_MODE);
     /* Configuration for the SPI slave interface */
     spi_slave_interface_config_t slvcfg = {
-        .mode = g_spi_mode,
+        .mode = CONFIG_ESP_SPI_CONTROLLER_MODE,
         .spics_io_num = GPIO_CS,
         .queue_size = SPI_QUEUE_SIZE,
         .flags = 0,
@@ -604,21 +665,39 @@ static interface_handle_t * esp_spi_init(void)
     gpio_config_t io_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL << gpio_handshake)
+        .pin_bit_mask = BIT_MASK(gpio_handshake)
     };
 
     /* Configuration for data_ready line */
     gpio_config_t io_data_ready_conf = {
         .intr_type = GPIO_INTR_DISABLE,
         .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = (1ULL << gpio_data_ready)
+        .pin_bit_mask = BIT_MASK(gpio_data_ready)
     };
 
     /* Configure handshake and data_ready lines as output */
     gpio_config(&io_conf);
     gpio_config(&io_data_ready_conf);
-    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_handshake));
-    WRITE_PERI_REG(GPIO_OUT_W1TC_REG, (1ULL << gpio_data_ready));
+    GPIO_PIN_CLR(gpio_handshake);
+    GPIO_PIN_CLR(gpio_data_ready);
+
+
+#ifdef CONFIG_BOARD_ACT_LED_ENABLED
+    /* Create a one-shot timer to turn off the LED after 50ms of silence */
+    act_led_timer = xTimerCreate("act_led_timer", pdMS_TO_TICKS(50), pdFALSE, 0, act_led_off_callback);
+
+    /* Configure output for the Activity LED */
+    gpio_config_t led_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = BIT_MASK(gpio_act_led)
+    };
+    gpio_config(&led_conf);
+
+    /* Ensure LED is OFF at startup (IO17 = Low) */
+    GPIO_PIN_CLR(gpio_act_led);
+    ESP_LOGI(TAG, "Activity LED enabled on GPIO %d (Active-High)", gpio_act_led);
+#endif
 
     /* Enable pull-ups on SPI lines
      * so that no rogue pulses when no master is connected
@@ -627,6 +706,7 @@ static interface_handle_t * esp_spi_init(void)
     gpio_set_pull_mode(GPIO_SCLK, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(GPIO_CS, GPIO_PULLUP_ONLY);
 
+    assign_pin_to_clear_handshake(GPIO_CS);
 
     ESP_LOGI(TAG, "SPI Ctrl:%u mode: %u, GPIOs: MOSI: %u, MISO: %u, CS: %u, CLK: %u HS: %u DR: %u\n",
         ESP_SPI_CONTROLLER, slvcfg.mode,
@@ -740,7 +820,7 @@ static int32_t esp_spi_write(interface_handle_t *handle, interface_buffer_handle
     }
 
     /* indicate waiting data on ready pin */
-    WRITE_PERI_REG(GPIO_OUT_W1TS_REG, (1ULL << gpio_data_ready));
+    GPIO_PIN_SET(gpio_data_ready);
 
     return buf_handle->payload_len;
 }
@@ -796,6 +876,17 @@ static esp_err_t esp_spi_reset(interface_handle_t *handle)
 static void esp_spi_deinit(interface_handle_t *handle)
 {
     esp_err_t ret = ESP_OK;
+
+#ifdef CONFIG_BOARD_ACT_LED_ENABLED
+    /* Clean up the LED timer */
+    if (act_led_timer) {
+	xTimerStop(act_led_timer, portMAX_DELAY);
+	xTimerDelete(act_led_timer, portMAX_DELAY);
+	act_led_timer = NULL;
+    }
+    /* Ensure LED is off before closing down */
+    GPIO_PIN_CLR(gpio_act_led);
+#endif
 
     ret = spi_slave_free(ESP_SPI_CONTROLLER);
     if (ESP_OK != ret) {

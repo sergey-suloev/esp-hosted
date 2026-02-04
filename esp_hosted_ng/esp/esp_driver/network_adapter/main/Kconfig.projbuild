@@ -30,6 +30,14 @@ menu "Example Configuration"
         help
             SPI controller to be used. HSPI->2, VSPI->3
 
+    config ESP_SPI_CONTROLLER_MODE
+        int "SPI controller mode to use"
+        depends on ESP_SPI_HOST_INTERFACE
+        default 2
+        range 0 3
+        help
+	    SPI controller mode to be used.
+
     config ESP_SPI_GPIO_HANDSHAKE
         int "GPIO pin for handshake"
         default 3 if IDF_TARGET_ESP32C2
@@ -158,5 +166,18 @@ menu "Example Configuration"
         default 921600
         help
             UART Baudrate for HCI over ESP32C3/S3/C6. Please use standard baudrate.
+
+    config BOARD_ACT_LED_ENABLED
+        bool "Enable board activity LED"
+        default y
+        help
+            Enable/disable the board activity LED
+
+    config BOARD_ACT_LED_PIN_GPIO
+        int "Board activity LED pin GPIO number"
+        depends on BOARD_ACT_LED_ENABLED
+        default 17
+        help
+            This GPIO pin used to drive the board activity LED.
 
 endmenu
