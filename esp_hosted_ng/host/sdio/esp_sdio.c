@@ -352,6 +352,7 @@ static int init_context(struct esp_sdio_context *context)
 	}
 
 	context->adapter->if_type = ESP_IF_TYPE_SDIO;
+	context->adapter->if_context = context;
 
 	return 0;
 }
