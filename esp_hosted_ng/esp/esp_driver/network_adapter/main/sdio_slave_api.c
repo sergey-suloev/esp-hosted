@@ -33,6 +33,11 @@
 #include "soc/gpio_reg.h"
 #include "esp_fw_version.h"
 
+#define BIT_MASK(bit)	(1ULL << (bit))
+
+#define GPIO_PIN_SET(gpio_num)	WRITE_PERI_REG(GPIO_OUT_W1TS_REG, BIT_MASK(gpio_num))
+#define GPIO_PIN_CLR(gpio_num)	WRITE_PERI_REG(GPIO_OUT_W1TC_REG, BIT_MASK(gpio_num))
+
 static uint8_t sdio_slave_rx_buffer[RX_BUF_NUM][RX_BUF_SIZE];
 
 static interface_context_t context;
@@ -56,6 +61,18 @@ static if_ops_t if_ops = {
     .reset = sdio_reset,
     .deinit = sdio_deinit,
 };
+
+/* Data Activity LED Configuration */
+#ifdef CONFIG_BOARD_ACT_LED_ENABLED
+static const uint8_t gpio_act_led = CONFIG_BOARD_ACT_LED_PIN_GPIO;
+
+static TimerHandle_t act_led_timer = NULL;
+/* This function runs automatically when traffic stops */
+static void act_led_off_callback(TimerHandle_t xTimer)
+{
+    GPIO_PIN_CLR(gpio_act_led);
+}
+#endif
 
 interface_context_t *interface_insert_driver(int (*event_handler)(uint8_t val))
 {
@@ -100,7 +117,7 @@ static void sdio_read_done(void *handle)
     sdio_slave_recv_load_buf((sdio_slave_buf_handle_t) handle);
 }
 
-static interface_handle_t * sdio_init(void)
+static interface_handle_t *sdio_init(void)
 {
     esp_err_t ret = ESP_OK;
     sdio_slave_buf_handle_t handle = {0};
@@ -127,6 +144,24 @@ static interface_handle_t * sdio_init(void)
     };
 #ifdef CONFIG_SDIO_DEFAULT_SPEED
     config.flags |= SDIO_SLAVE_FLAG_DEFAULT_SPEED;
+#endif
+
+#if CONFIG_BOARD_ACT_LED_ENABLED
+    /* Create a one-shot timer to turn off the LED after 50ms of silence */
+    act_led_timer = xTimerCreate("act_led_timer", pdMS_TO_TICKS(50), pdFALSE,
+				0, act_led_off_callback);
+
+    /* Configure output for the Activity LED */
+    gpio_config_t led_conf = {
+        .intr_type = GPIO_INTR_DISABLE,
+        .mode = GPIO_MODE_OUTPUT,
+        .pin_bit_mask = BIT_MASK(gpio_act_led)
+    };
+    gpio_config(&led_conf);
+
+    /* Ensure LED is OFF at startup (IO17 = Low) */
+    GPIO_PIN_CLR(gpio_act_led);
+    ESP_LOGI(TAG, "Activity LED enabled on GPIO %d (Active-High)", gpio_act_led);
 #endif
 
     /* Configuration for the OOB line */
@@ -291,6 +326,28 @@ static int32_t sdio_write(interface_handle_t *handle, interface_buffer_handle_t 
 #endif
     free(sendbuf);
 
+#ifdef CONFIG_BOARD_ACT_LED_ENABLED
+    static int write_count = 0;
+
+    // Only toggle the LED every 4 packets
+    // This creates visible "gaps" in the light even during heavy traffic
+    if (write_count++ % 4 == 0) {
+	// This will flip the state: if it's on, turn it off. If it's off, turn it on.
+	static bool write_state = false;
+	write_state = !write_state;
+
+	if (write_state) {
+	    GPIO_PIN_SET(gpio_act_led);
+	} else {
+	    GPIO_PIN_CLR(gpio_act_led);
+	}
+    }
+    /* Kick the watchdog: Reset the timer every time we see activity */
+    if (act_led_timer) {
+	xTimerReset(act_led_timer, 0);
+    }
+#endif
+
     return buf_handle->payload_len;
 }
 
@@ -426,6 +483,29 @@ static int sdio_read(interface_handle_t *if_handle, interface_buffer_handle_t *b
     ESP_LOGE(TAG, "\nFrom Host");
     ESP_LOG_BUFFER_HEXDUMP("h->s", buf_handle->payload, len, ESP_LOG_INFO);
 #endif
+
+#ifdef CONFIG_BOARD_ACT_LED_ENABLED
+    static int read_count = 0;
+
+    // Only toggle the LED every 4 packets
+    // This creates visible "gaps" in the light even during heavy traffic
+    if (read_count++ % 4 == 0) {
+        // This will flip the state: if it's on, turn it off. If it's off, turn it on.
+        static bool read_state = false;
+        read_state = !read_state;
+
+        if (read_state) {
+            GPIO_PIN_SET(gpio_act_led);
+        } else {
+            GPIO_PIN_CLR(gpio_act_led);
+        }
+    }
+    /* Kick the watchdog: Reset the timer every time we see activity */
+    if (act_led_timer) {
+        xTimerReset(act_led_timer, 0);
+    }
+#endif
+
     return len;
 }
 
@@ -465,6 +545,17 @@ static esp_err_t sdio_reset(interface_handle_t *handle)
 
 static void sdio_deinit(interface_handle_t *handle)
 {
+#ifdef CONFIG_BOARD_ACT_LED_ENABLED
+    /* Clean up the LED timer */
+    if (act_led_timer) {
+        xTimerStop(act_led_timer, portMAX_DELAY);
+        xTimerDelete(act_led_timer, portMAX_DELAY);
+        act_led_timer = NULL;
+    }
+    /* Ensure LED is off before closing down */
+    GPIO_PIN_CLR(gpio_act_led);
+#endif
+
     if (wakeup_sem) {
         /* Dummy take and give sema before deleting it */
         xSemaphoreTake(wakeup_sem, portMAX_DELAY);
